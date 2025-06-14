@@ -1,0 +1,21 @@
+roles:
+  - name: ceo1
+    type: ai
+    model: ""
+    behavior: "Define project goal."
+  - name: pm1
+    type: ai
+    model: ""
+    behavior: "Break goal into tasks."
+  - name: planner1
+    type: ai
+    model: ""
+    behavior: "Write specs."
+  - name: engineer1
+    type: ai
+    model: ""
+    behavior: "Write code."
+  - name: engineer2
+    type: ai
+    model: ""
+    behavior: "Write code (parallel)." 
