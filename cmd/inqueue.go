@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"strings"
@@ -22,8 +23,8 @@ var inqueueCmd = &cobra.Command{
 
 		// roles.yamlがなくてもエラーにしない。instructions/や*_queue.mdからロール候補を自動検出
 		var candidates []string
-		// instructions/から
-		entries, err := os.ReadDir("instructions")
+		// instructions/から（embed.FSを使う）
+		entries, err := readInstructionDir()
 		if err == nil {
 			for _, entry := range entries {
 				if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".md") && entry.Name() != "sufix.md" {
@@ -63,20 +64,13 @@ var inqueueCmd = &cobra.Command{
 		inqueueCounter[role]++
 		inqueueMutex.Unlock()
 		assigned := candidates[idx]
-		queueFile := fmt.Sprintf("clampany_queue/%s_queue.md", role)
+		queueFile := fmt.Sprintf("_clampany/queue/%s_queue_%s.md", role, fmt.Sprintf("%x", sha256.Sum256([]byte(message)))[:8])
 		// 改行をスペースに置換して1行にまとめる
 		message = strings.ReplaceAll(message, "\n", " ")
 		message = strings.ReplaceAll(message, "\r", " ")
-		section := fmt.Sprintf("\n[%s]\n%s\n", assigned, message)
-		f, err := os.OpenFile(queueFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
-		if err != nil {
+		section := message + "\n"
+		if err := os.WriteFile(queueFile, []byte(section), 0644); err != nil {
 			fmt.Println(queueFile+"書き込み失敗:", err)
-			os.Exit(1)
-		}
-		defer f.Close()
-		_, err = f.WriteString(section)
-		if err != nil {
-			fmt.Println(queueFile+"追記失敗:", err)
 			os.Exit(1)
 		}
 		fmt.Printf("[INQUEUE] %s → %s (%s)\n", assigned, message, queueFile)

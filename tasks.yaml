@@ -1,0 +1,17 @@
+tasks:
+  - name: ceo_task
+    role: ceo
+    prompt: "経営判断を下す"
+    depends_on: []
+  - name: pm_task
+    role: pm
+    prompt: "要件定義を行う"
+    depends_on: [ceo_task]
+  - name: planner_task
+    role: planner
+    prompt: "設計を行う"
+    depends_on: [pm_task]
+  - name: engineer_task
+    role: engineer
+    prompt: "実装を行う"
+    depends_on: [planner_task] 

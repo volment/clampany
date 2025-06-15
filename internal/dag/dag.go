@@ -3,7 +3,11 @@ package dag
 import (
 	"clampany/internal"
 	"errors"
+	"fmt"
+	"os"
 	"sort"
+
+	"gopkg.in/yaml.v2"
 )
 
 type DAG struct {
@@ -11,7 +15,48 @@ type DAG struct {
 	Edges map[string][]string
 }
 
+func validateRoleFlows(tasks []internal.Task, roleMap map[string][]string) error {
+	taskRole := map[string]string{}
+	for _, task := range tasks {
+		taskRole[task.Name] = task.Role
+	}
+
+	for _, task := range tasks {
+		for _, dep := range task.DependsOn {
+			fromRole := taskRole[dep]
+			toRole := task.Role
+			allowed := roleMap[fromRole]
+			isAllowed := false
+			for _, r := range allowed {
+				if r == toRole {
+					isAllowed = true
+					break
+				}
+			}
+			if !isAllowed {
+				return fmt.Errorf("invalid role flow: %s → %s (from task %s to %s)", fromRole, toRole, dep, task.Name)
+			}
+		}
+	}
+	return nil
+}
+
 func NewDAG(tasks []internal.Task) (*DAG, error) {
+	roleData, err := os.ReadFile("roles.yaml")
+	if err != nil {
+		return nil, fmt.Errorf("failed to read roles.yaml: %w", err)
+	}
+	var roleMap struct {
+		AllowedFlows map[string][]string `yaml:"allowed_flows"`
+	}
+	if err := yaml.Unmarshal(roleData, &roleMap); err != nil {
+		return nil, fmt.Errorf("failed to parse roles.yaml: %w", err)
+	}
+
+	if err := validateRoleFlows(tasks, roleMap.AllowedFlows); err != nil {
+		return nil, err
+	}
+
 	d := &DAG{
 		Tasks: map[string]*internal.Task{},
 		Edges: map[string][]string{},
