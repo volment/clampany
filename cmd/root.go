@@ -10,9 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
@@ -62,6 +60,8 @@ var initCmd = &cobra.Command{
 	},
 }
 
+var engineerCount int
+
 // 埋め込み→外部ファイルの順で読む関数
 func readInstructionFile(name string) ([]byte, error) {
 	return os.ReadFile("_clampany/instructions/" + name)
@@ -87,18 +87,30 @@ func startPersistentWorkers() {
 		}
 	}
 	os.MkdirAll("_clampany/queue", 0755)
-	// roles.yamlがなくてもエラーにしない。<role>_queue.mdやinstructions/<role>.mdからロール一覧を自動検出
 	aiRoles := []string{}
 	entries, err := readInstructionDir()
 	if err == nil {
 		for _, entry := range entries {
 			if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".md") && entry.Name() != "sufix.md" {
 				role := strings.TrimSuffix(entry.Name(), ".md")
+				if role == "engineer" && engineerCount > 0 {
+					continue
+				}
 				aiRoles = append(aiRoles, role)
 			}
 		}
 	}
-	// fallback: *_queue.mdからもロール名を検出
+	if engineerCount > 0 {
+		for i := 1; i <= engineerCount; i++ {
+			aiRoles = append(aiRoles, fmt.Sprintf("engineer%d", i))
+		}
+	} else {
+		for _, entry := range entries {
+			if entry.Type().IsRegular() && entry.Name() == "engineer.md" {
+				aiRoles = append(aiRoles, "engineer")
+			}
+		}
+	}
 	queueEntries, err := os.ReadDir(".")
 	for _, entry := range queueEntries {
 		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), "_queue.md") {
@@ -120,51 +132,192 @@ func startPersistentWorkers() {
 		os.Exit(1)
 	}
 
-	// ceoを最後に回す
-	ceoIdx := -1
-	for i, r := range aiRoles {
-		if r == "ceo" || strings.HasPrefix(r, "ceo") {
-			ceoIdx = i
-			break
+	// ロール分割
+	rightRoles := []string{}
+	for _, r := range aiRoles {
+		if strings.HasPrefix(r, "engineer") {
+			rightRoles = append(rightRoles, r)
 		}
 	}
-	if ceoIdx != -1 && ceoIdx != len(aiRoles)-1 {
-		ceoRole := aiRoles[ceoIdx]
-		aiRoles = append(aiRoles[:ceoIdx], aiRoles[ceoIdx+1:]...)
-		aiRoles = append(aiRoles, ceoRole)
+
+	paneMap := map[string]string{}
+
+	// 1. split-window -h（右に分割、2列）
+	cmd := exec.Command("tmux", "split-window", "-h", "-P", "-F", "#{pane_id}", "zsh")
+	out, err := cmd.Output()
+	if err != nil {
+		fmt.Println("tmux初期右分割失敗:", err)
+		os.Exit(1)
+	}
+	curPaneCmd := exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+	curPaneOut, err := curPaneCmd.Output()
+	if err != nil {
+		fmt.Println("tmux現在ペイン取得失敗:", err)
+		os.Exit(1)
+	}
+	leftPane := strings.TrimSpace(string(curPaneOut))
+	rightPane := strings.TrimSpace(string(out))
+
+	// 2. split-window -h（さらに右に分割、3列）
+	cmd = exec.Command("tmux", "split-window", "-h", "-P", "-F", "#{pane_id}", "zsh")
+	out, err = cmd.Output()
+	if err != nil {
+		fmt.Println("tmux中央分割失敗:", err)
+		os.Exit(1)
 	}
 
-	// ペインごとにreadyフラグを用意
-	ready := map[string]bool{}
-	// 2. ロールごとにペイン生成＋claude起動＋ラベル付与
-	paneMap := map[string]string{}
-	paneStatus := map[string]string{} // "init", "waiting", "running"
-	paneStatusCount := map[string]int{}
-	skippedFirstInqueue := map[string]bool{}
-	// seenTokens := map[string]bool{}
-	var mu sync.Mutex
-	var wg sync.WaitGroup
-	wg.Add(len(aiRoles))
-	for _, role := range aiRoles {
-		go func(role string) {
-			defer wg.Done()
-			cmd := exec.Command("tmux", "split-window", "-v", "-P", "-F", "#{pane_id}", "bash")
-			out, err := cmd.Output()
-			if err != nil {
-				fmt.Printf("tmuxペイン作成失敗(%s): %v\n", role, err)
-				os.Exit(1)
-			}
-			paneID := strings.TrimSpace(string(out))
-			mu.Lock()
-			paneMap[role] = paneID
-			ready[role] = false // 初期状態は未起動
-			paneStatus[role] = "init"
-			paneStatusCount[role] = 0
-			skippedFirstInqueue[role] = false
-			mu.Unlock()
-			if err := exec.Command("tmux", "select-pane", "-t", paneID, "-T", role).Run(); err != nil {
-				fmt.Printf("ラベル付与失敗(%s): %v\n", role, err)
-			}
+	// 3. select-pane -L（左端に移動）
+	exec.Command("tmux", "select-pane", "-L").Run()
+	exec.Command("tmux", "select-pane", "-L").Run()
+
+	// 4. split-window -v（左列を下に分割、2ペイン目＝監視用）
+	cmd = exec.Command("tmux", "split-window", "-v", "-P", "-F", "#{pane_id}", "watch -n 1 cat run/latest/pane_status.txt")
+	out, err = cmd.Output()
+	if err != nil {
+		fmt.Println("tmux左列監視ペイン作成失敗:", err)
+		os.Exit(1)
+	}
+	watchPane := strings.TrimSpace(string(out))
+	paneMap["active"] = leftPane
+	paneMap["watch"] = watchPane
+	// 左列均等割り
+	exec.Command("bash", "-c", `left=$(tmux list-panes -F "#{pane_left}" | sort -n | uniq | sed -n 2p); panes=($(tmux list-panes -F "#{pane_id} #{pane_left}" | awk -v l="$left" '$2 == l {print $1}')); h=$(tmux display -p "#{window_height}"); eh=$((h / ${#panes[@]})); for p in "${panes[@]}"; do tmux resize-pane -t "$p" -y "$eh"; done`).Run()
+
+	// 5. select-pane -R（中央列へ移動）
+	exec.Command("tmux", "select-pane", "-R").Run()
+
+	// 6. ceo起動
+	// 7. split-window -v（中央列下に分割、2ペイン目）
+	cmd = exec.Command("tmux", "display-message", "-p", "#{pane_id}")
+	out, err = cmd.Output()
+	if err != nil {
+		fmt.Println("tmux中央列ceo分割失敗:", err)
+		os.Exit(1)
+	}
+	centerPane := strings.TrimSpace(string(out))
+	paneMap["ceo"] = centerPane
+	// claude起動・ラベル付与
+	exec.Command("tmux", "select-pane", "-t", centerPane, "-T", "ceo").Run()
+	roleContent, _ := readInstructionFile("ceo.md")
+	sufixContent, _ := readInstructionFile("sufix.md")
+	prompt := strings.TrimSpace(string(roleContent) + "\n" + string(sufixContent))
+	prompt = strings.ReplaceAll(prompt, "'", "'\\''")
+	tmpfile, _ := os.CreateTemp("", "clampany_prompt_*.txt")
+	defer os.Remove(tmpfile.Name())
+	tmpfile.WriteString(prompt)
+	tmpfile.Close()
+	cmdStr := fmt.Sprintf("claude --dangerously-skip-permissions \"$(cat %s)\"", tmpfile.Name())
+	exec.Command("tmux", "send-keys", "-t", centerPane, cmdStr, "C-m").Run()
+	time.Sleep(800 * time.Millisecond)
+	for _, line := range strings.Split(string(roleContent), "\n") {
+		if strings.TrimSpace(line) != "" {
+			exec.Command("tmux", "send-keys", "-t", centerPane, line, "C-m").Run()
+			exec.Command("tmux", "send-keys", "-t", centerPane, "Enter").Run()
+			time.Sleep(80 * time.Millisecond)
+		}
+	}
+	for _, line := range strings.Split(string(sufixContent), "\n") {
+		if strings.TrimSpace(line) != "" {
+			exec.Command("tmux", "send-keys", "-t", centerPane, line, "C-m").Run()
+			exec.Command("tmux", "send-keys", "-t", centerPane, "Enter").Run()
+			time.Sleep(80 * time.Millisecond)
+		}
+	}
+
+	// 8. split-window -v（中央列下に分割、2ペイン目）
+	cmd = exec.Command("tmux", "split-window", "-v", "-P", "-F", "#{pane_id}", "zsh")
+	out, err = cmd.Output()
+	if err != nil {
+		fmt.Println("tmux中央列pm分割失敗:", err)
+		os.Exit(1)
+	}
+	pmPane := strings.TrimSpace(string(out))
+	paneMap["pm"] = pmPane
+	// claude起動・ラベル付与
+	exec.Command("tmux", "select-pane", "-t", pmPane, "-T", "pm").Run()
+	roleContent, _ = readInstructionFile("pm.md")
+	sufixContent, _ = readInstructionFile("sufix.md")
+	prompt = strings.TrimSpace(string(roleContent) + "\n" + string(sufixContent))
+	prompt = strings.ReplaceAll(prompt, "'", "'\\''")
+	tmpfile, _ = os.CreateTemp("", "clampany_prompt_*.txt")
+	defer os.Remove(tmpfile.Name())
+	tmpfile.WriteString(prompt)
+	tmpfile.Close()
+	cmdStr = fmt.Sprintf("claude --dangerously-skip-permissions \"$(cat %s)\"", tmpfile.Name())
+	exec.Command("tmux", "send-keys", "-t", pmPane, cmdStr, "C-m").Run()
+	time.Sleep(800 * time.Millisecond)
+	for _, line := range strings.Split(string(roleContent), "\n") {
+		if strings.TrimSpace(line) != "" {
+			exec.Command("tmux", "send-keys", "-t", pmPane, line, "C-m").Run()
+			exec.Command("tmux", "send-keys", "-t", pmPane, "Enter").Run()
+			time.Sleep(80 * time.Millisecond)
+		}
+	}
+	for _, line := range strings.Split(string(sufixContent), "\n") {
+		if strings.TrimSpace(line) != "" {
+			exec.Command("tmux", "send-keys", "-t", pmPane, line, "C-m").Run()
+			exec.Command("tmux", "send-keys", "-t", pmPane, "Enter").Run()
+			time.Sleep(80 * time.Millisecond)
+		}
+	}
+
+	// 8. （中央列下に分割、3ペイン目）
+	cmd = exec.Command("tmux", "split-window", "-v", "-P", "-F", "#{pane_id}", "zsh")
+	out, err = cmd.Output()
+	if err != nil {
+		fmt.Println("tmux中央列planner分割失敗:", err)
+		os.Exit(1)
+	}
+	plannerPane := strings.TrimSpace(string(out))
+	paneMap["planner"] = plannerPane
+	// claude起動・ラベル付与
+	exec.Command("tmux", "select-pane", "-t", plannerPane, "-T", "planner").Run()
+	roleContent, _ = readInstructionFile("planner.md")
+	sufixContent, _ = readInstructionFile("sufix.md")
+	prompt = strings.TrimSpace(string(roleContent) + "\n" + string(sufixContent))
+	prompt = strings.ReplaceAll(prompt, "'", "'\\''")
+	tmpfile, _ = os.CreateTemp("", "clampany_prompt_*.txt")
+	defer os.Remove(tmpfile.Name())
+	tmpfile.WriteString(prompt)
+	tmpfile.Close()
+	cmdStr = fmt.Sprintf("claude --dangerously-skip-permissions \"$(cat %s)\"", tmpfile.Name())
+	exec.Command("tmux", "send-keys", "-t", plannerPane, cmdStr, "C-m").Run()
+	time.Sleep(800 * time.Millisecond)
+	for _, line := range strings.Split(string(roleContent), "\n") {
+		if strings.TrimSpace(line) != "" {
+			exec.Command("tmux", "send-keys", "-t", plannerPane, line, "C-m").Run()
+			exec.Command("tmux", "send-keys", "-t", plannerPane, "Enter").Run()
+			time.Sleep(80 * time.Millisecond)
+		}
+	}
+	for _, line := range strings.Split(string(sufixContent), "\n") {
+		if strings.TrimSpace(line) != "" {
+			exec.Command("tmux", "send-keys", "-t", plannerPane, line, "C-m").Run()
+			exec.Command("tmux", "send-keys", "-t", plannerPane, "Enter").Run()
+			time.Sleep(80 * time.Millisecond)
+		}
+	}
+
+	// 9. select-pane -R（右列へ移動）
+	exec.Command("tmux", "select-pane", "-R").Run()
+
+	// 移動後のアクティブペインIDを取得
+	out, err = exec.Command("tmux", "display-message", "-p", "#{pane_id}").Output()
+	if err != nil {
+		panic("tmux pane ID取得失敗")
+	}
+
+	// 10. engineerN起動
+	rightPaneIDs := []string{}
+	rightPane = strings.TrimSpace(string(out))
+	rightCurPane := rightPane
+	for i, role := range rightRoles {
+		if i == 0 {
+			// 1つ目は既存ペイン
+			rightPaneIDs = append(rightPaneIDs, rightCurPane)
+			paneMap[role] = rightCurPane
+			// claude起動・ラベル付与
+			exec.Command("tmux", "select-pane", "-t", rightCurPane, "-T", role).Run()
 			roleBase := role
 			if strings.HasSuffix(role, "1") || strings.HasSuffix(role, "2") || strings.HasSuffix(role, "3") || strings.HasSuffix(role, "4") || strings.HasSuffix(role, "5") {
 				roleBase = strings.TrimRight(role, "0123456789")
@@ -178,59 +331,68 @@ func startPersistentWorkers() {
 			tmpfile.WriteString(prompt)
 			tmpfile.Close()
 			cmdStr := fmt.Sprintf("claude --dangerously-skip-permissions \"$(cat %s)\"", tmpfile.Name())
-			if err := exec.Command("tmux", "send-keys", "-t", paneID, cmdStr, "C-m").Run(); err != nil {
-				fmt.Printf("claude起動失敗(%s): %v\n", role, err)
-			}
+			exec.Command("tmux", "send-keys", "-t", rightCurPane, cmdStr, "C-m").Run()
 			time.Sleep(800 * time.Millisecond)
-			roleBase = role
-			if strings.HasSuffix(role, "1") || strings.HasSuffix(role, "2") || strings.HasSuffix(role, "3") || strings.HasSuffix(role, "4") || strings.HasSuffix(role, "5") {
-				roleBase = strings.TrimRight(role, "0123456789")
-			}
-			roleContent, _ = readInstructionFile(roleBase + ".md")
-			sufixContent, _ = readInstructionFile("sufix.md")
 			for _, line := range strings.Split(string(roleContent), "\n") {
 				if strings.TrimSpace(line) != "" {
-					exec.Command("tmux", "send-keys", "-t", paneID, line, "C-m").Run()
-					exec.Command("tmux", "send-keys", "-t", paneID, "Enter").Run()
+					exec.Command("tmux", "send-keys", "-t", rightCurPane, line, "C-m").Run()
+					exec.Command("tmux", "send-keys", "-t", rightCurPane, "Enter").Run()
 					time.Sleep(80 * time.Millisecond)
 				}
 			}
 			for _, line := range strings.Split(string(sufixContent), "\n") {
 				if strings.TrimSpace(line) != "" {
-					exec.Command("tmux", "send-keys", "-t", paneID, line, "C-m").Run()
-					exec.Command("tmux", "send-keys", "-t", paneID, "Enter").Run()
+					exec.Command("tmux", "send-keys", "-t", rightCurPane, line, "C-m").Run()
+					exec.Command("tmux", "send-keys", "-t", rightCurPane, "Enter").Run()
 					time.Sleep(80 * time.Millisecond)
 				}
 			}
-			fmt.Printf("[DEBUG] ペイン生成: %s → %s\n", role, paneID)
-			go func(r string) {
-				time.Sleep(2000 * time.Millisecond)
-				mu.Lock()
-				ready[r] = true
-				paneStatus[r] = "waiting"
-				mu.Unlock()
-			}(role)
-			time.Sleep(1 * time.Second)
-		}(role)
-	}
-	wg.Wait()
-	exec.Command("tmux", "select-layout", "tiled").Run()
-
-	// 3. ロールごとにキュー(chan string)生成
-	queues := map[string]chan string{}
-	for _, role := range aiRoles {
-		queues[role] = make(chan string, 100)
-	}
-
-	// 4. ロールごとに永続ワーカー起動
-	for _, role := range aiRoles {
-		go func(role string) {
-			execAI := &executor.AIExecutor{PaneID: paneMap[role]}
-			for prompt := range queues[role] {
-				execAI.Execute(prompt)
+		} else {
+			// 2つ目以降は新規ペイン
+			cmd = exec.Command("tmux", "split-window", "-v", "-P", "-F", "#{pane_id}", "zsh")
+			out, err = cmd.Output()
+			if err != nil {
+				fmt.Println("tmux右列分割失敗:", err)
+				os.Exit(1)
 			}
-		}(role)
+			rightCurPane = strings.TrimSpace(string(out))
+			rightPaneIDs = append(rightPaneIDs, rightCurPane)
+			paneMap[role] = rightCurPane
+			// claude起動・ラベル付与
+			exec.Command("tmux", "select-pane", "-t", rightCurPane, "-T", role).Run()
+			roleBase := role
+			if strings.HasSuffix(role, "1") || strings.HasSuffix(role, "2") || strings.HasSuffix(role, "3") || strings.HasSuffix(role, "4") || strings.HasSuffix(role, "5") {
+				roleBase = strings.TrimRight(role, "0123456789")
+			}
+			roleContent, _ := readInstructionFile(roleBase + ".md")
+			sufixContent, _ := readInstructionFile("sufix.md")
+			prompt := strings.TrimSpace(string(roleContent) + "\n" + string(sufixContent))
+			prompt = strings.ReplaceAll(prompt, "'", "'\\''")
+			tmpfile, _ := os.CreateTemp("", "clampany_prompt_*.txt")
+			defer os.Remove(tmpfile.Name())
+			tmpfile.WriteString(prompt)
+			tmpfile.Close()
+			cmdStr := fmt.Sprintf("claude --dangerously-skip-permissions \"$(cat %s)\"", tmpfile.Name())
+			exec.Command("tmux", "send-keys", "-t", rightCurPane, cmdStr, "C-m").Run()
+			time.Sleep(800 * time.Millisecond)
+			for _, line := range strings.Split(string(roleContent), "\n") {
+				if strings.TrimSpace(line) != "" {
+					exec.Command("tmux", "send-keys", "-t", rightCurPane, line, "C-m").Run()
+					exec.Command("tmux", "send-keys", "-t", rightCurPane, "Enter").Run()
+					time.Sleep(80 * time.Millisecond)
+				}
+			}
+			for _, line := range strings.Split(string(sufixContent), "\n") {
+				if strings.TrimSpace(line) != "" {
+					exec.Command("tmux", "send-keys", "-t", rightCurPane, line, "C-m").Run()
+					exec.Command("tmux", "send-keys", "-t", rightCurPane, "Enter").Run()
+					time.Sleep(80 * time.Millisecond)
+				}
+			}
+		}
 	}
+	// 右列均等割り
+	exec.Command("bash", "-c", `left=$(tmux list-panes -F "#{pane_left}" | sort -n | uniq | sed -n 2p); panes=($(tmux list-panes -F "#{pane_id} #{pane_left}" | awk -v l="$left" '$2 == l {print $1}')); h=$(tmux display -p "#{window_height}"); eh=$((h / ${#panes[@]})); for p in "${panes[@]}"; do tmux resize-pane -t "$p" -y "$eh"; done`).Run()
 
 	// 5. panes.json保存
 	os.MkdirAll("run/latest", 0755)
@@ -241,28 +403,19 @@ func startPersistentWorkers() {
 	fmt.Println("[Clampany] 全ロール永続ワーカー起動中。Ctrl+Cで終了")
 
 	// 6. 各ロールごとに<role>_queue.mdを監視し、指示を自分のキューに流し込む
+	queues := map[string]chan string{}
 	for _, role := range aiRoles {
-		roleBase := role
-		if strings.HasSuffix(role, "1") || strings.HasSuffix(role, "2") || strings.HasSuffix(role, "3") || strings.HasSuffix(role, "4") || strings.HasSuffix(role, "5") {
-			roleBase = strings.TrimRight(role, "0123456789")
-		}
-		queueFile := fmt.Sprintf("clampany/queue/%s_queue.md", roleBase)
-		go func(role, queueFile string) {
-			for {
-				files, _ := filepath.Glob(fmt.Sprintf("_clampany/queue/%s_queue_*.md", roleBase))
-				for _, queueFile := range files {
-					b, err := os.ReadFile(queueFile)
-					if err == nil {
-						msg := strings.TrimSpace(string(b))
-						if msg != "" {
-							queues[role] <- msg
-							os.Remove(queueFile) // キュー投入後にファイルごと削除
-						}
-					}
-				}
-				time.Sleep(2 * time.Second)
+		queues[role] = make(chan string, 100)
+	}
+
+	// 7. 各ロールごとに永続ワーカー起動
+	for _, role := range aiRoles {
+		go func(role string) {
+			execAI := &executor.AIExecutor{PaneID: paneMap[role]}
+			for prompt := range queues[role] {
+				execAI.Execute(prompt)
 			}
-		}(role, queueFile)
+		}(role)
 	}
 
 	// 8. 各ペインの出力を監視し、clampany inqueue ...が出たら即時実行（複数行対応・永続履歴）
@@ -380,16 +533,12 @@ func startPersistentWorkers() {
 	writeStatus := func() {
 		os.MkdirAll("run/latest", 0755)
 		f, _ := os.Create("run/latest/pane_status.txt")
-		mu.Lock()
-		for role, status := range paneStatus {
-			f.WriteString(fmt.Sprintf("[%s] %s\n", role, status))
-		}
-		mu.Unlock()
+		// paneStatusの参照を削除
+		// for role, status := range paneStatus {
+		// 	f.WriteString(fmt.Sprintf("[%s] %s\n", role, status))
+		// }
 		f.Close()
 	}
-	// ステータス監視ペインを追加
-	statusPaneCmd := exec.Command("tmux", "split-window", "-v", "-P", "-F", "#{pane_id}", "watch -n 1 cat run/latest/pane_status.txt")
-	statusPaneCmd.Output()
 	// ステータスファイルを定期的に更新
 	go func() {
 		for {
@@ -427,4 +576,5 @@ func Execute() error {
 func init() {
 	os.MkdirAll("_clampany/queue", 0755)
 	rootCmd.AddCommand(initCmd)
+	rootCmd.PersistentFlags().IntVar(&engineerCount, "engineer", 0, "追加するengineerロールの数 (例: --engineer 3 でengineer1,engineer2,engineer3)")
 }
