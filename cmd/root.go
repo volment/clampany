@@ -321,6 +321,9 @@ func startPersistentWorkers() {
 
 	// --- 追加: _clampany/queue/<role>_queue*.md を監視し、内容をチャネルに流し込む ---
 	for _, role := range aiRoles {
+		if strings.HasPrefix(role, "engineer") {
+			continue
+		}
 		go func(role string) {
 			fileSizes := map[string]int64{}
 			pendingLines := []string{}
@@ -332,7 +335,8 @@ func startPersistentWorkers() {
 						fi, err := os.Stat(queueFile)
 						if err == nil {
 							lastSize := fileSizes[queueFile]
-							if fi.Size() > lastSize {
+							curSize := fi.Size()
+							if _, ok := fileSizes[queueFile]; !ok || curSize > fileSizes[queueFile] {
 								f, err := os.Open(queueFile)
 								if err == nil {
 									f.Seek(lastSize, io.SeekStart)
@@ -349,10 +353,10 @@ func startPersistentWorkers() {
 									os.Remove(queueFile)
 								}
 							}
+							fileSizes[queueFile] = curSize
 						}
 					}
 				}
-				// waiting状態のときだけキューを流す
 				mu.Lock()
 				status := paneStatus[role]
 				mu.Unlock()
@@ -364,6 +368,65 @@ func startPersistentWorkers() {
 			}
 		}(role)
 	}
+
+	// --- engineer専用の共通キュー監視 ---
+	go func() {
+		fileSizes := map[string]int64{}
+		var pendingLines []string
+		for {
+			pattern := "_clampany/queue/engineer_queue*.md"
+			files, err := filepath.Glob(pattern)
+			if err == nil {
+				for _, queueFile := range files {
+					fi, err := os.Stat(queueFile)
+					if err == nil {
+						lastSize := fileSizes[queueFile]
+						if fi.Size() > lastSize {
+							f, err := os.Open(queueFile)
+							if err == nil {
+								f.Seek(lastSize, io.SeekStart)
+								buf, _ := io.ReadAll(f)
+								lines := strings.Split(string(buf), "\n")
+								for _, line := range lines {
+									line = strings.TrimSpace(line)
+									if line != "" {
+										pendingLines = append(pendingLines, line)
+									}
+								}
+								fileSizes[queueFile] = fi.Size()
+								f.Close()
+								os.Remove(queueFile)
+							}
+						}
+					}
+				}
+			}
+
+			newPending := []string{}
+			for _, line := range pendingLines {
+				assigned := false
+
+				mu.Lock()
+				for _, r := range aiRoles {
+					if strings.HasPrefix(r, "engineer") && paneStatus[r] == "waiting" {
+						queues[r] <- line
+						assigned = true
+						break
+					}
+				}
+				mu.Unlock()
+
+				if !assigned {
+					newPending = append(newPending, line)
+				}
+			}
+
+			// pendingLinesを置き換え
+			pendingLines = newPending
+
+			time.Sleep(1 * time.Second)
+		}
+	}()
 
 	// 7. 各ロールごとに永続ワーカー起動
 	for _, role := range aiRoles {
