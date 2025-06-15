@@ -1,4 +1,0 @@
-[ceo] init
-[engineer] init
-[planner] init
-[pm] init
