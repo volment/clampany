@@ -10,12 +10,17 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 )
+
+var ansiRegexp = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
 
 //go:embed instructions/*.md
 var instructionsFS embed.FS
@@ -62,6 +67,18 @@ var initCmd = &cobra.Command{
 
 var engineerCount int
 
+// --- ステータス管理用グローバル変数 ---
+var (
+	mu              sync.Mutex
+	paneStatus      = map[string]string{} // ロールごとの状態: init/waiting/running
+	paneStatusCount = map[string]int{}    // ロールごとのwaiting回数
+	currentCommand  = map[string]string{} // ロールごとの現在のコマンド
+	runningCount    = map[string]int{}    // running回数
+	waitingCount    = map[string]int{}    // waiting回数
+)
+
+var aiRoles []string // ←グローバルに移動
+
 // 埋め込み→外部ファイルの順で読む関数
 func readInstructionFile(name string) ([]byte, error) {
 	return os.ReadFile("_clampany/instructions/" + name)
@@ -87,7 +104,7 @@ func startPersistentWorkers() {
 		}
 	}
 	os.MkdirAll("_clampany/queue", 0755)
-	aiRoles := []string{}
+	aiRoles = []string{} // ←ここで初期化
 	entries, err := readInstructionDir()
 	if err == nil {
 		for _, entry := range entries {
@@ -141,6 +158,16 @@ func startPersistentWorkers() {
 	}
 
 	paneMap := map[string]string{}
+
+	// --- ここで全ロールのステータス初期化 ---
+	for _, role := range aiRoles {
+		mu.Lock()
+		paneStatus[role] = "init"
+		currentCommand[role] = ""
+		runningCount[role] = 0
+		waitingCount[role] = 0
+		mu.Unlock()
+	}
 
 	// 1. split-window -h（右に分割、2列）
 	cmd := exec.Command("tmux", "split-window", "-h", "-P", "-F", "#{pane_id}", "zsh")
@@ -292,136 +319,191 @@ func startPersistentWorkers() {
 		queues[role] = make(chan string, 100)
 	}
 
+	// --- 追加: _clampany/queue/<role>_queue*.md を監視し、内容をチャネルに流し込む ---
+	for _, role := range aiRoles {
+		go func(role string) {
+			fileSizes := map[string]int64{}
+			pendingLines := []string{}
+			for {
+				pattern := fmt.Sprintf("_clampany/queue/%s_queue*.md", role)
+				files, err := filepath.Glob(pattern)
+				if err == nil {
+					for _, queueFile := range files {
+						fi, err := os.Stat(queueFile)
+						if err == nil {
+							lastSize := fileSizes[queueFile]
+							if fi.Size() > lastSize {
+								f, err := os.Open(queueFile)
+								if err == nil {
+									f.Seek(lastSize, io.SeekStart)
+									buf, _ := io.ReadAll(f)
+									lines := strings.Split(string(buf), "\n")
+									for _, line := range lines {
+										line = strings.TrimSpace(line)
+										if line != "" {
+											pendingLines = append(pendingLines, line)
+										}
+									}
+									fileSizes[queueFile] = fi.Size()
+									f.Close()
+									os.Remove(queueFile)
+								}
+							}
+						}
+					}
+				}
+				// waiting状態のときだけキューを流す
+				mu.Lock()
+				status := paneStatus[role]
+				mu.Unlock()
+				if status == "waiting" && len(pendingLines) > 0 {
+					queues[role] <- pendingLines[0]
+					pendingLines = pendingLines[1:]
+				}
+				time.Sleep(1 * time.Second)
+			}
+		}(role)
+	}
+
 	// 7. 各ロールごとに永続ワーカー起動
 	for _, role := range aiRoles {
 		go func(role string) {
 			execAI := &executor.AIExecutor{PaneID: paneMap[role]}
 			for prompt := range queues[role] {
+				mu.Lock()
+				currentCommand[role] = prompt
+				paneStatus[role] = "running"
+				runningCount[role]++
+				mu.Unlock()
 				execAI.Execute(prompt)
+				mu.Lock()
+				paneStatus[role] = "waiting"
+				waitingCount[role]++
+				currentCommand[role] = ""
+				mu.Unlock()
 			}
 		}(role)
 	}
 
-	// 8. 各ペインの出力を監視し、clampany inqueue ...が出たら即時実行（複数行対応・永続履歴）
-	/*
-		for _, role := range aiRoles {
-			paneID := paneMap[role]
-			go func(paneID, role string) {
-				const logFile = "executed_inqueue.log"
-				maxLogLines := 1000
-				loadExecuted := func() map[string]bool {
-					executed := map[string]bool{}
-					b, err := os.ReadFile(logFile)
-					if err == nil {
-						lines := strings.Split(string(b), "\n")
-						for _, l := range lines {
-							if l != "" {
-								executed[l] = true
+	// --- 追加: 各ワーカーの標準出力を監視し、[READY]が出力されたらinit→waitingに遷移 ---
+	for _, role := range aiRoles {
+		paneID := paneMap[role]
+		go func(role, paneID string) {
+			for {
+				out, err := exec.Command("tmux", "capture-pane", "-t", paneID, "-p", "-S", "-1000").Output()
+				if err == nil {
+					lines := strings.Split(string(out), "\n")
+					for _, line := range lines {
+						cleanLine := ansiRegexp.ReplaceAllString(line, "")
+						if strings.Contains(cleanLine, "[READY]") {
+							mu.Lock()
+							if paneStatus[role] == "init" {
+								paneStatus[role] = "waiting"
 							}
+							mu.Unlock()
 						}
 					}
-					return executed
 				}
-				appendHash := func(hash string) {
-					b, _ := os.ReadFile(logFile)
-					lines := strings.Split(string(b), "\n")
-					lines = append(lines, hash)
-					if len(lines) > maxLogLines {
-						lines = lines[len(lines)-maxLogLines:]
-					}
-					os.WriteFile(logFile, []byte(strings.Join(lines, "\n")), 0644)
-				}
-				for {
-					out, err := exec.Command("tmux", "capture-pane", "-t", paneID, "-p", "-S", "-50").Output()
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "❌ tmux capture error on %s: %v\n", paneID, err)
-						time.Sleep(2 * time.Second)
-						continue
-					}
-					lines := string(out)
-					mu.Lock()
-					prevStatus := paneStatus[role]
-					waitingCount := paneStatusCount[role]
-					seen := seenTokens[role]
+				time.Sleep(1 * time.Second)
+
+				// すでにwaitingになっていたら終了
+				mu.Lock()
+				if paneStatus[role] == "waiting" {
 					mu.Unlock()
-					if strings.Contains(lines, "tokens") {
-						if !seen {
-							mu.Lock()
-							seenTokens[role] = true
-							mu.Unlock()
+					break
+				}
+				mu.Unlock()
+			}
+		}(role, paneID)
+	}
+
+	// --- 追加: tokens表示中はrunning, それ以外はwaitingに遷移 ---
+	for _, role := range aiRoles {
+		paneID := paneMap[role]
+		go func(role, paneID string) {
+			for {
+				out, err := exec.Command("tmux", "capture-pane", "-t", paneID, "-p", "-S", "-1000").Output()
+				if err == nil {
+					lines := strings.Split(string(out), "\n")
+					foundTokens := false
+					for _, line := range lines {
+						cleanLine := ansiRegexp.ReplaceAllString(line, "")
+						if strings.Contains(cleanLine, "tokens") {
+							foundTokens = true
+							break
 						}
-						if prevStatus != "running" {
-							mu.Lock()
+					}
+					mu.Lock()
+					if foundTokens {
+						if paneStatus[role] != "running" {
 							paneStatus[role] = "running"
-							mu.Unlock()
-							fmt.Printf("[DEBUG] %sペインがtokens検知→running状態に遷移\n", role)
 						}
 					} else {
-						if !seen {
-							if prevStatus != "init" {
-								mu.Lock()
-								paneStatus[role] = "init"
-								mu.Unlock()
-								fmt.Printf("[DEBUG] %sペインは初期化中（tokens未検知）\n", role)
-							}
-							// tokens未検知の間はinitを維持
-							goto WAITLOOP
-						}
-						if prevStatus != "waiting" {
-							mu.Lock()
+						if paneStatus[role] == "running" {
 							paneStatus[role] = "waiting"
-							paneStatusCount[role] = waitingCount + 1
-							mu.Unlock()
-							fmt.Printf("[DEBUG] %sペインがtokens消失→waiting状態に遷移（%d回目）\n", role, waitingCount+1)
 						}
 					}
-				WAITLOOP:
-					if !ready[role] || paneStatus[role] != "waiting" || paneStatusCount[role] < 2 {
-						time.Sleep(1 * time.Second)
-						continue
-					}
-					executed := loadExecuted()
-					// 全出力をスペースで1行に連結し、clampany inqueueコマンド（クォート内も含めて貪欲に）を抽出
-					joined := strings.ReplaceAll(lines, "\n", " ")
-					re := regexp.MustCompile(`(?s)clampany inqueue \w+ ".+?"`)
-					matches := re.FindAllString(joined, -1)
-					for _, cmd := range matches {
-						if !skippedFirstInqueue[role] {
-							mu.Lock()
-							skippedFirstInqueue[role] = true
-							mu.Unlock()
-							fmt.Println("[SKIP] 初回clampany inqueueコマンドをスキップ:", cmd)
-							continue
-						}
-						hash := fmt.Sprintf("%x", sha256.Sum256([]byte(cmd)))
-						if !executed[hash] {
-							fmt.Println("🟢 実行:", cmd)
-							mu.Lock()
-							paneStatus[role] = "running"
-							mu.Unlock()
-							go func(c, h string) {
-								if err := exec.Command("sh", "-c", c).Run(); err != nil {
-									fmt.Fprintf(os.Stderr, "❌ 実行失敗: %s: %v\n", c, err)
-								}
-								appendHash(h)
-							}(cmd, hash)
-						}
-					}
-					time.Sleep(2 * time.Second)
+					mu.Unlock()
 				}
-			}(paneID, role)
-		}
-	*/
+				time.Sleep(1 * time.Second)
+			}
+		}(role, paneID)
+	}
 
 	// ステータスファイル出力用関数
 	writeStatus := func() {
 		os.MkdirAll("run/latest", 0755)
 		f, _ := os.Create("run/latest/pane_status.txt")
-		// paneStatusの参照を削除
-		// for role, status := range paneStatus {
-		// 	f.WriteString(fmt.Sprintf("[%s] %s\n", role, status))
-		// }
-		f.Close()
+		defer f.Close()
+
+		// ロール順固定: aiRolesの順番で出力
+		roles := aiRoles
+
+		for _, role := range roles {
+			mu.Lock()
+			status := paneStatus[role]
+			cmd := currentCommand[role]
+			runCnt := runningCount[role]
+			waitCnt := waitingCount[role]
+			mu.Unlock()
+
+			// 稼働率計算
+			total := runCnt + waitCnt
+			var rate int
+			if status == "waiting" {
+				rate = 0
+			} else if total > 0 {
+				rate = int(float64(runCnt) / float64(total) * 100)
+			} else {
+				rate = 0
+			}
+			barLen := 10
+			barFill := int(float64(rate) / 100 * float64(barLen))
+			bar := strings.Repeat("█", barFill) + strings.Repeat("░", barLen-barFill)
+
+			// 状態アイコン
+			icon := "⚪"
+			switch status {
+			case "running":
+				icon = "🟢"
+			case "waiting":
+				icon = "🟡"
+			case "init":
+				icon = "⚪"
+			}
+
+			// コマンド表示
+			cmdDisp := cmd
+			if cmdDisp == "" {
+				if status == "init" {
+					cmdDisp = "(初期化中)"
+				} else {
+					cmdDisp = "(待機中)"
+				}
+			}
+
+			fmt.Fprintf(f, "[%-9s]%s %-8s | コマンド: %-20s | 稼働率: %s %3d%%\n", role, icon, status, cmdDisp, bar, rate)
+		}
 	}
 	// ステータスファイルを定期的に更新
 	go func() {
