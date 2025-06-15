@@ -198,31 +198,9 @@ func startPersistentWorkers() {
 	paneMap["ceo"] = centerPane
 	// claude起動・ラベル付与
 	exec.Command("tmux", "select-pane", "-t", centerPane, "-T", "ceo").Run()
-	roleContent, _ := readInstructionFile("ceo.md")
-	sufixContent, _ := readInstructionFile("sufix.md")
-	prompt := strings.TrimSpace(string(roleContent) + "\n" + string(sufixContent))
-	prompt = strings.ReplaceAll(prompt, "'", "'\\''")
-	tmpfile, _ := os.CreateTemp("", "clampany_prompt_*.txt")
-	defer os.Remove(tmpfile.Name())
-	tmpfile.WriteString(prompt)
-	tmpfile.Close()
-	cmdStr := fmt.Sprintf("claude --dangerously-skip-permissions \"$(cat %s)\"", tmpfile.Name())
+	cmdStr := fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %s %s)"`, "_clampany/instructions/ceo.md", "_clampany/instructions/sufix.md")
 	exec.Command("tmux", "send-keys", "-t", centerPane, cmdStr, "C-m").Run()
 	time.Sleep(800 * time.Millisecond)
-	for _, line := range strings.Split(string(roleContent), "\n") {
-		if strings.TrimSpace(line) != "" {
-			exec.Command("tmux", "send-keys", "-t", centerPane, line, "C-m").Run()
-			exec.Command("tmux", "send-keys", "-t", centerPane, "Enter").Run()
-			time.Sleep(80 * time.Millisecond)
-		}
-	}
-	for _, line := range strings.Split(string(sufixContent), "\n") {
-		if strings.TrimSpace(line) != "" {
-			exec.Command("tmux", "send-keys", "-t", centerPane, line, "C-m").Run()
-			exec.Command("tmux", "send-keys", "-t", centerPane, "Enter").Run()
-			time.Sleep(80 * time.Millisecond)
-		}
-	}
 
 	// 8. split-window -v（中央列下に分割、2ペイン目）
 	cmd = exec.Command("tmux", "split-window", "-v", "-P", "-F", "#{pane_id}", "zsh")
@@ -235,31 +213,8 @@ func startPersistentWorkers() {
 	paneMap["pm"] = pmPane
 	// claude起動・ラベル付与
 	exec.Command("tmux", "select-pane", "-t", pmPane, "-T", "pm").Run()
-	roleContent, _ = readInstructionFile("pm.md")
-	sufixContent, _ = readInstructionFile("sufix.md")
-	prompt = strings.TrimSpace(string(roleContent) + "\n" + string(sufixContent))
-	prompt = strings.ReplaceAll(prompt, "'", "'\\''")
-	tmpfile, _ = os.CreateTemp("", "clampany_prompt_*.txt")
-	defer os.Remove(tmpfile.Name())
-	tmpfile.WriteString(prompt)
-	tmpfile.Close()
-	cmdStr = fmt.Sprintf("claude --dangerously-skip-permissions \"$(cat %s)\"", tmpfile.Name())
+	cmdStr = fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %s %s)"`, "_clampany/instructions/pm.md", "_clampany/instructions/sufix.md")
 	exec.Command("tmux", "send-keys", "-t", pmPane, cmdStr, "C-m").Run()
-	time.Sleep(800 * time.Millisecond)
-	for _, line := range strings.Split(string(roleContent), "\n") {
-		if strings.TrimSpace(line) != "" {
-			exec.Command("tmux", "send-keys", "-t", pmPane, line, "C-m").Run()
-			exec.Command("tmux", "send-keys", "-t", pmPane, "Enter").Run()
-			time.Sleep(80 * time.Millisecond)
-		}
-	}
-	for _, line := range strings.Split(string(sufixContent), "\n") {
-		if strings.TrimSpace(line) != "" {
-			exec.Command("tmux", "send-keys", "-t", pmPane, line, "C-m").Run()
-			exec.Command("tmux", "send-keys", "-t", pmPane, "Enter").Run()
-			time.Sleep(80 * time.Millisecond)
-		}
-	}
 
 	// 8. （中央列下に分割、3ペイン目）
 	cmd = exec.Command("tmux", "split-window", "-v", "-P", "-F", "#{pane_id}", "zsh")
@@ -272,31 +227,8 @@ func startPersistentWorkers() {
 	paneMap["planner"] = plannerPane
 	// claude起動・ラベル付与
 	exec.Command("tmux", "select-pane", "-t", plannerPane, "-T", "planner").Run()
-	roleContent, _ = readInstructionFile("planner.md")
-	sufixContent, _ = readInstructionFile("sufix.md")
-	prompt = strings.TrimSpace(string(roleContent) + "\n" + string(sufixContent))
-	prompt = strings.ReplaceAll(prompt, "'", "'\\''")
-	tmpfile, _ = os.CreateTemp("", "clampany_prompt_*.txt")
-	defer os.Remove(tmpfile.Name())
-	tmpfile.WriteString(prompt)
-	tmpfile.Close()
-	cmdStr = fmt.Sprintf("claude --dangerously-skip-permissions \"$(cat %s)\"", tmpfile.Name())
+	cmdStr = fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %s %s)"`, "_clampany/instructions/planner.md", "_clampany/instructions/sufix.md")
 	exec.Command("tmux", "send-keys", "-t", plannerPane, cmdStr, "C-m").Run()
-	time.Sleep(800 * time.Millisecond)
-	for _, line := range strings.Split(string(roleContent), "\n") {
-		if strings.TrimSpace(line) != "" {
-			exec.Command("tmux", "send-keys", "-t", plannerPane, line, "C-m").Run()
-			exec.Command("tmux", "send-keys", "-t", plannerPane, "Enter").Run()
-			time.Sleep(80 * time.Millisecond)
-		}
-	}
-	for _, line := range strings.Split(string(sufixContent), "\n") {
-		if strings.TrimSpace(line) != "" {
-			exec.Command("tmux", "send-keys", "-t", plannerPane, line, "C-m").Run()
-			exec.Command("tmux", "send-keys", "-t", plannerPane, "Enter").Run()
-			time.Sleep(80 * time.Millisecond)
-		}
-	}
 
 	// 9. select-pane -R（右列へ移動）
 	exec.Command("tmux", "select-pane", "-R").Run()
@@ -318,35 +250,11 @@ func startPersistentWorkers() {
 			paneMap[role] = rightCurPane
 			// claude起動・ラベル付与
 			exec.Command("tmux", "select-pane", "-t", rightCurPane, "-T", role).Run()
-			roleBase := role
 			if strings.HasSuffix(role, "1") || strings.HasSuffix(role, "2") || strings.HasSuffix(role, "3") || strings.HasSuffix(role, "4") || strings.HasSuffix(role, "5") {
-				roleBase = strings.TrimRight(role, "0123456789")
+				_ = strings.TrimRight(role, "0123456789")
 			}
-			roleContent, _ := readInstructionFile(roleBase + ".md")
-			sufixContent, _ := readInstructionFile("sufix.md")
-			prompt := strings.TrimSpace(string(roleContent) + "\n" + string(sufixContent))
-			prompt = strings.ReplaceAll(prompt, "'", "'\\''")
-			tmpfile, _ := os.CreateTemp("", "clampany_prompt_*.txt")
-			defer os.Remove(tmpfile.Name())
-			tmpfile.WriteString(prompt)
-			tmpfile.Close()
-			cmdStr := fmt.Sprintf("claude --dangerously-skip-permissions \"$(cat %s)\"", tmpfile.Name())
+			cmdStr = fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %s %s)"`, "_clampany/instructions/engineer.md", "_clampany/instructions/sufix.md")
 			exec.Command("tmux", "send-keys", "-t", rightCurPane, cmdStr, "C-m").Run()
-			time.Sleep(800 * time.Millisecond)
-			for _, line := range strings.Split(string(roleContent), "\n") {
-				if strings.TrimSpace(line) != "" {
-					exec.Command("tmux", "send-keys", "-t", rightCurPane, line, "C-m").Run()
-					exec.Command("tmux", "send-keys", "-t", rightCurPane, "Enter").Run()
-					time.Sleep(80 * time.Millisecond)
-				}
-			}
-			for _, line := range strings.Split(string(sufixContent), "\n") {
-				if strings.TrimSpace(line) != "" {
-					exec.Command("tmux", "send-keys", "-t", rightCurPane, line, "C-m").Run()
-					exec.Command("tmux", "send-keys", "-t", rightCurPane, "Enter").Run()
-					time.Sleep(80 * time.Millisecond)
-				}
-			}
 		} else {
 			// 2つ目以降は新規ペイン
 			cmd = exec.Command("tmux", "split-window", "-v", "-P", "-F", "#{pane_id}", "zsh")
@@ -360,35 +268,11 @@ func startPersistentWorkers() {
 			paneMap[role] = rightCurPane
 			// claude起動・ラベル付与
 			exec.Command("tmux", "select-pane", "-t", rightCurPane, "-T", role).Run()
-			roleBase := role
 			if strings.HasSuffix(role, "1") || strings.HasSuffix(role, "2") || strings.HasSuffix(role, "3") || strings.HasSuffix(role, "4") || strings.HasSuffix(role, "5") {
-				roleBase = strings.TrimRight(role, "0123456789")
+				_ = strings.TrimRight(role, "0123456789")
 			}
-			roleContent, _ := readInstructionFile(roleBase + ".md")
-			sufixContent, _ := readInstructionFile("sufix.md")
-			prompt := strings.TrimSpace(string(roleContent) + "\n" + string(sufixContent))
-			prompt = strings.ReplaceAll(prompt, "'", "'\\''")
-			tmpfile, _ := os.CreateTemp("", "clampany_prompt_*.txt")
-			defer os.Remove(tmpfile.Name())
-			tmpfile.WriteString(prompt)
-			tmpfile.Close()
-			cmdStr := fmt.Sprintf("claude --dangerously-skip-permissions \"$(cat %s)\"", tmpfile.Name())
+			cmdStr = fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %s %s)"`, "_clampany/instructions/engineer.md", "_clampany/instructions/sufix.md")
 			exec.Command("tmux", "send-keys", "-t", rightCurPane, cmdStr, "C-m").Run()
-			time.Sleep(800 * time.Millisecond)
-			for _, line := range strings.Split(string(roleContent), "\n") {
-				if strings.TrimSpace(line) != "" {
-					exec.Command("tmux", "send-keys", "-t", rightCurPane, line, "C-m").Run()
-					exec.Command("tmux", "send-keys", "-t", rightCurPane, "Enter").Run()
-					time.Sleep(80 * time.Millisecond)
-				}
-			}
-			for _, line := range strings.Split(string(sufixContent), "\n") {
-				if strings.TrimSpace(line) != "" {
-					exec.Command("tmux", "send-keys", "-t", rightCurPane, line, "C-m").Run()
-					exec.Command("tmux", "send-keys", "-t", rightCurPane, "Enter").Run()
-					time.Sleep(80 * time.Millisecond)
-				}
-			}
 		}
 	}
 	// 右列均等割り
@@ -566,6 +450,18 @@ func extractSection(content, start string) string {
 		return strings.TrimSpace(remain)
 	}
 	return strings.TrimSpace(remain[:end])
+}
+
+// コマンド行だけ抽出する関数を追加
+func extractCommandLines(content []byte) []string {
+	var cmds []string
+	for _, line := range strings.Split(string(content), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "./clampany inqueue") {
+			cmds = append(cmds, line)
+		}
+	}
+	return cmds
 }
 
 func Execute() error {
