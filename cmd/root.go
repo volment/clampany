@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -16,7 +17,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-	"log"
 
 	"github.com/spf13/cobra"
 )

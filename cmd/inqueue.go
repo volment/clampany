@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"sync"
 
@@ -20,6 +22,55 @@ var inqueueCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		role := args[0]
 		message := args[1]
+
+		// ロールの上下関係を定義
+		allowedDown := map[string]string{
+			"ceo":     "pm",
+			"pm":      "planner",
+			"planner": "engineer",
+		}
+		allowedUp := map[string]string{
+			"pm":       "ceo",
+			"planner":  "pm",
+			"engineer": "planner",
+		}
+
+		// メッセージの送り元ロールを推定（現状はコマンド実行者のロール情報がないため、ここは仮実装。必要なら引数追加）
+		// ここではmessage内に "from:<role>" のような記述があればそれを使う例
+		fromRole := ""
+		if strings.Contains(message, "from:") {
+			parts := strings.Split(message, "from:")
+			if len(parts) > 1 {
+				fromRole = strings.Fields(parts[1])[0]
+			}
+		}
+		// fromRoleがなければ許可（従来通り）
+		if fromRole != "" {
+			ok := false
+			if allowedDown[fromRole] == role {
+				ok = true // トップダウン
+			}
+			if allowedUp[fromRole] == role {
+				ok = true // ボトムアップ
+			}
+			if !ok {
+				// ペインに警告送信
+				// run/latest/panes.jsonからペインID取得
+				f, err := os.Open("run/latest/panes.json")
+				if err == nil {
+					defer f.Close()
+					var paneMap map[string]string
+					if err := json.NewDecoder(f).Decode(&paneMap); err == nil {
+						paneID, ok := paneMap[fromRole]
+						if ok {
+							msg := fmt.Sprintf("あなたは依頼の場合は`%s role`、問い合わせの場合は`%s role`にしか送信できません。", allowedDown[fromRole], allowedUp[fromRole])
+							exec.Command("tmux", "send-keys", "-t", paneID, msg, "C-m").Run()
+						}
+					}
+				}
+				return
+			}
+		}
 
 		// roles.yamlがなくてもエラーにしない。instructions/や*_queue.mdからロール候補を自動検出
 		var candidates []string
