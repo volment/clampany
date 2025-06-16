@@ -16,6 +16,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"log"
 
 	"github.com/spf13/cobra"
 )
@@ -87,6 +88,48 @@ func readInstructionFile(name string) ([]byte, error) {
 // ディレクトリ一覧も埋め込み→外部ファイル順で取得
 func readInstructionDir() ([]fs.DirEntry, error) {
 	return os.ReadDir("_clampany/instructions")
+}
+
+// --- 追加: ロールごとのclaudeコマンド生成 ---
+func getClaudeCommand(role string) string {
+	var inst string
+	switch role {
+	case "ceo":
+		inst = "ceo.md"
+	case "pm":
+		inst = "pm.md"
+	case "planner":
+		inst = "planner.md"
+	default:
+		inst = "engineer.md"
+	}
+	return fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat _clampany/instructions/%s _clampany/instructions/sufix.md)"`, inst)
+}
+
+// --- 追加: tmuxペイン生成とコマンド送信 ---
+func createRolePane(role, label, splitDir string, isFirst bool, basePane string) (string, error) {
+	var paneID string
+	var err error
+	if isFirst {
+		paneID = basePane
+	} else {
+		cmd := exec.Command("tmux", "split-window", splitDir, "-P", "-F", "#{pane_id}", "zsh")
+		out, err2 := cmd.Output()
+		if err2 != nil {
+			return "", err2
+		}
+		paneID = strings.TrimSpace(string(out))
+	}
+	exec.Command("tmux", "select-pane", "-t", paneID, "-T", label).Run()
+
+	cmdStr := getClaudeCommand(role)
+
+	// send-keys に渡すときはクォートで囲むと安全
+	err = exec.Command("tmux", "send-keys", "-t", paneID, cmdStr, "C-m").Run()
+	if err != nil {
+		log.Printf("tmux send-keys failed: %v", err)
+	}
+	return paneID, err
 }
 
 func startPersistentWorkers() {
@@ -224,9 +267,7 @@ func startPersistentWorkers() {
 	centerPane := strings.TrimSpace(string(out))
 	paneMap["ceo"] = centerPane
 	// claude起動・ラベル付与
-	exec.Command("tmux", "select-pane", "-t", centerPane, "-T", "ceo").Run()
-	cmdStr := fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %s %s)"`, "_clampany/instructions/ceo.md", "_clampany/instructions/sufix.md")
-	exec.Command("tmux", "send-keys", "-t", centerPane, cmdStr, "C-m").Run()
+	createRolePane("ceo", "ceo", "-v", true, centerPane)
 	time.Sleep(800 * time.Millisecond)
 
 	// 8. split-window -v（中央列下に分割、2ペイン目）
@@ -239,9 +280,7 @@ func startPersistentWorkers() {
 	pmPane := strings.TrimSpace(string(out))
 	paneMap["pm"] = pmPane
 	// claude起動・ラベル付与
-	exec.Command("tmux", "select-pane", "-t", pmPane, "-T", "pm").Run()
-	cmdStr = fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %s %s)"`, "_clampany/instructions/pm.md", "_clampany/instructions/sufix.md")
-	exec.Command("tmux", "send-keys", "-t", pmPane, cmdStr, "C-m").Run()
+	createRolePane("pm", "pm", "-v", true, pmPane)
 
 	// 8. （中央列下に分割、3ペイン目）
 	cmd = exec.Command("tmux", "split-window", "-v", "-P", "-F", "#{pane_id}", "zsh")
@@ -253,9 +292,7 @@ func startPersistentWorkers() {
 	plannerPane := strings.TrimSpace(string(out))
 	paneMap["planner"] = plannerPane
 	// claude起動・ラベル付与
-	exec.Command("tmux", "select-pane", "-t", plannerPane, "-T", "planner").Run()
-	cmdStr = fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %s %s)"`, "_clampany/instructions/planner.md", "_clampany/instructions/sufix.md")
-	exec.Command("tmux", "send-keys", "-t", plannerPane, cmdStr, "C-m").Run()
+	createRolePane("planner", "planner", "-v", true, plannerPane)
 
 	// 9. select-pane -R（右列へ移動）
 	exec.Command("tmux", "select-pane", "-R").Run()
@@ -271,35 +308,16 @@ func startPersistentWorkers() {
 	rightPane = strings.TrimSpace(string(out))
 	rightCurPane := rightPane
 	for i, role := range rightRoles {
-		if i == 0 {
-			// 1つ目は既存ペイン
-			rightPaneIDs = append(rightPaneIDs, rightCurPane)
-			paneMap[role] = rightCurPane
-			// claude起動・ラベル付与
-			exec.Command("tmux", "select-pane", "-t", rightCurPane, "-T", role).Run()
-			if strings.HasSuffix(role, "1") || strings.HasSuffix(role, "2") || strings.HasSuffix(role, "3") || strings.HasSuffix(role, "4") || strings.HasSuffix(role, "5") {
-				_ = strings.TrimRight(role, "0123456789")
-			}
-			cmdStr = fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %s %s)"`, "_clampany/instructions/engineer.md", "_clampany/instructions/sufix.md")
-			exec.Command("tmux", "send-keys", "-t", rightCurPane, cmdStr, "C-m").Run()
-		} else {
-			// 2つ目以降は新規ペイン
-			cmd = exec.Command("tmux", "split-window", "-v", "-P", "-F", "#{pane_id}", "zsh")
-			out, err = cmd.Output()
-			if err != nil {
-				fmt.Println("tmux右列分割失敗:", err)
-				os.Exit(1)
-			}
-			rightCurPane = strings.TrimSpace(string(out))
-			rightPaneIDs = append(rightPaneIDs, rightCurPane)
-			paneMap[role] = rightCurPane
-			// claude起動・ラベル付与
-			exec.Command("tmux", "select-pane", "-t", rightCurPane, "-T", role).Run()
-			if strings.HasSuffix(role, "1") || strings.HasSuffix(role, "2") || strings.HasSuffix(role, "3") || strings.HasSuffix(role, "4") || strings.HasSuffix(role, "5") {
-				_ = strings.TrimRight(role, "0123456789")
-			}
-			cmdStr = fmt.Sprintf(`claude --dangerously-skip-permissions "$(cat %s %s)"`, "_clampany/instructions/engineer.md", "_clampany/instructions/sufix.md")
-			exec.Command("tmux", "send-keys", "-t", rightCurPane, cmdStr, "C-m").Run()
+		isFirst := (i == 0)
+		pane, err := createRolePane(role, role, "-v", isFirst, rightCurPane)
+		if err != nil {
+			fmt.Printf("tmux右列分割失敗: %v\n", err)
+			os.Exit(1)
+		}
+		rightPaneIDs = append(rightPaneIDs, pane)
+		paneMap[role] = pane
+		if !isFirst {
+			rightCurPane = pane
 		}
 	}
 	// 右列均等割り
