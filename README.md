@@ -42,7 +42,7 @@ Go 1.21以上が必要です。
 ```sh
 git clone <このリポジトリ>
 cd clampany
-go build -o clampany main.go
+go build -o clampany .
 ```
 
 ## 使い方
@@ -62,11 +62,11 @@ tmux
 ### 指示の送信
 - ロール間の指示は`inqueue`コマンドで行います。
 ```sh
-./clampany inqueue planner "○○の仕様化"
+./clampany inqueue ceo "〇〇なサービス"
 ```
 - 直接ペインにプロンプトを送る場合は`send`コマンドを利用します。
 ```sh
-./clampany send --role planner --prompt "新しい仕様を確認してください"
+./clampany send --role ceo --prompt "〇〇なサービス"
 ```
 
 ## 主要コマンド
